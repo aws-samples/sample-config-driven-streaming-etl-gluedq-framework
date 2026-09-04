@@ -1,0 +1,114 @@
+# Streaming ETL Framework - Healthcare IoT Use Case
+# Exercises: PII masking, foreign keys, clinical DQ ranges, high completeness stakes
+#
+# COMPLIANCE NOTE: This example uses synthetic data and the mask_pii transform
+# for ILLUSTRATION ONLY. If you deploy this pattern with real patient data (PHI),
+# you are responsible for your own HIPAA/GDPR safeguards, including a Business
+# Associate Agreement (BAA) with AWS where required.
+# See https://aws.amazon.com/compliance/hipaa-compliance/
+#
+# DMS Type Mapping (RDS → Kafka → Spark):
+#   integer → integer
+#   numeric → double (DMS sends decimals as doubles)
+#   boolean → string (DMS sends as "true"/"false")
+#   timestamp → string (DMS sends as ISO string)
+#   varchar/text → string
+
+settings:
+  checkpoint_location: "s3://${STACK_NAME}-assets-${AWS_ACCOUNT_ID}/checkpoints/"
+  quarantine_path: "s3://${STACK_NAME}-quarantine-${AWS_ACCOUNT_ID}/"
+  delta_bucket: "${STACK_NAME}-delta-${AWS_ACCOUNT_ID}"
+  trigger_interval: "10 seconds"
+
+kafka:
+  bootstrap_servers: "PLACEHOLDER_BOOTSTRAP_SERVERS"
+  security_protocol: "SASL_SSL"
+  sasl_mechanism: "SCRAM-SHA-512"
+  sasl_username: "kafkaadmin"
+
+source_database:
+  engine: "postgres"
+  schema_name: "public"
+
+tables:
+  # ============================================================================
+  # patients: 9 columns — PII masking, regex validation, high completeness
+  # ============================================================================
+  - name: patients
+    topic: cdc-patients
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/patients/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: mrn, type: string, nullable: false, unique: true}
+      - {name: name, type: string, nullable: false}
+      - {name: dob, type: date, nullable: true}
+      - {name: phone, type: string, nullable: true}
+      - {name: address, type: string, nullable: true}
+      - {name: status, type: string, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+      - {name: updated_at, type: string, nullable: true}
+    dq_rules:
+      - {id: pat_001, type: regex, column: mrn, params: {pattern: "^MRN-\\d{6}$"}, severity: error}
+      - {id: pat_002, type: not_null, column: name, params: {}, severity: error}
+    transforms:
+      - {id: pat_tx_001, type: mask_pii, column: phone, params: {visible_chars: 4}, order: 1}
+      - {id: pat_tx_002, type: mask_pii, column: name, params: {visible_chars: 2}, order: 2}
+      - {id: pat_tx_003, type: mask_pii, column: address, params: {visible_chars: 0}, order: 3}
+    quality_checks:
+      - {metric: completeness, column: mrn, threshold: 1.0, severity: error}
+      - {metric: uniqueness, column: mrn, threshold: 1.0, severity: error}
+
+  # ============================================================================
+  # vitals: 9 columns — clinical ranges, foreign keys, indexes
+  # ============================================================================
+  - name: vitals
+    topic: cdc-vitals
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/vitals/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: patient_id, type: integer, nullable: false}
+      - {name: heart_rate, type: double, nullable: true}
+      - {name: blood_pressure_sys, type: double, nullable: true}
+      - {name: blood_pressure_dia, type: double, nullable: true}
+      - {name: temperature_c, type: double, nullable: true}
+      - {name: spo2_pct, type: double, nullable: true}
+      - {name: recorded_at, type: string, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+    dq_rules:
+      - {id: vit_001, type: range, column: heart_rate, params: {min: 20, max: 300}, severity: error}
+      - {id: vit_002, type: range, column: temperature_c, params: {min: 30, max: 45}, severity: error}
+      - {id: vit_003, type: range, column: spo2_pct, params: {min: 0, max: 100}, severity: error}
+      - {id: vit_004, type: range, column: blood_pressure_sys, params: {min: 50, max: 250}, severity: error}
+      - {id: vit_005, type: range, column: blood_pressure_dia, params: {min: 30, max: 150}, severity: error}
+    quality_checks:
+      - {metric: completeness, column: patient_id, threshold: 1.0, severity: error}
+      - {metric: completeness, column: heart_rate, threshold: 0.95, severity: warning}
+      - {metric: completeness, column: temperature_c, threshold: 0.90, severity: warning}
+    transforms:
+      - {id: vit_tx_001, type: round, column: temperature_c, params: {decimals: 1}, order: 1}
+      - {id: vit_tx_002, type: round, column: heart_rate, params: {decimals: 0}, order: 2}
+    foreign_keys:
+      - {column: patient_id, references: {table: patients, column: id}}
+    indexes:
+      - {columns: [patient_id]}
+      - {columns: [recorded_at]}
+
+  # ============================================================================
+  # Internal table for native Glue DQ results (no Kafka source)
+  # ============================================================================
+  - name: dq_metrics
+    internal: true
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/dq_metrics/"
+    primary_key: null
+    # Schema matches the native Glue DQ results written by glue_dq_analyzer.py
+    schema:
+      - {name: table_name, type: string, nullable: false}
+      - {name: batch_id, type: bigint, nullable: false}
+      - {name: rule, type: string, nullable: false}
+      - {name: outcome, type: string, nullable: false}
+      - {name: failure_reason, type: string, nullable: true}
+      - {name: evaluated_metrics, type: string, nullable: true}
+      - {name: passed, type: boolean, nullable: false}
+      - {name: timestamp, type: timestamp, nullable: false}

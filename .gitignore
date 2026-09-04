@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Generated deploy artifacts (created by deploy.sh / config compiler)
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Binaries — never commit (Lambda layers are built from pinned PyPI versions
+# at deploy time; see scripts/deploy.sh)
+*.whl
+*.jar
+src/libs/
+
+# Logs and temp
+*.log
+tmp/
+*.tmp
+
+# Secrets (never commit)
+.env
+.env.local
+secrets.yaml
+credentials.json
+*.pem
+
+# Internal working docs (not part of the published sample)
+z-blueprint.md

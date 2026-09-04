@@ -1,0 +1,181 @@
+# Streaming ETL Framework - Vehicle Telemetry Use Case
+# Demo: IoT Fleet Management CDC Pipeline
+#
+# COMPLIANCE NOTE: This example uses synthetic data; the mask_pii transform is
+# shown for illustration only. If you deploy this pattern with real personal
+# data (driver names, phone numbers, GPS traces), you are responsible for your
+# own GDPR/privacy safeguards.
+#
+# DMS Type Mapping (RDS → Kafka → Spark):
+#   integer → integer
+#   numeric → double (DMS sends decimals as doubles)
+#   boolean → string (DMS sends as "true"/"false")
+#   timestamp → string (DMS sends as ISO string)
+#   varchar/text → string
+
+settings:
+  checkpoint_location: "s3://${STACK_NAME}-assets-${AWS_ACCOUNT_ID}/checkpoints/"
+  quarantine_path: "s3://${STACK_NAME}-quarantine-${AWS_ACCOUNT_ID}/"
+  delta_bucket: "${STACK_NAME}-delta-${AWS_ACCOUNT_ID}"
+  trigger_interval: "15 seconds"
+
+kafka:
+  bootstrap_servers: "PLACEHOLDER_BOOTSTRAP_SERVERS"
+  security_protocol: "SASL_SSL"
+  sasl_mechanism: "SCRAM-SHA-512"
+  sasl_username: "kafkaadmin"
+
+source_database:
+  engine: "postgres"
+  schema_name: "public"
+
+tables:
+  # ============================================================================
+  # vehicles: 10 columns
+  # ============================================================================
+  - name: vehicles
+    topic: cdc-vehicles
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/vehicles/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: vin, type: string, nullable: false, unique: true}
+      - {name: license_plate, type: string, nullable: true}
+      - {name: make, type: string, nullable: true}
+      - {name: model, type: string, nullable: true}
+      - {name: year, type: integer, nullable: true}
+      - {name: fuel_type, type: string, nullable: true}
+      - {name: status, type: string, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+      - {name: updated_at, type: string, nullable: true}
+
+  # ============================================================================
+  # drivers: 9 columns
+  # ============================================================================
+  - name: drivers
+    topic: cdc-drivers
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/drivers/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: employee_id, type: string, nullable: false, unique: true}
+      - {name: name, type: string, nullable: false}
+      - {name: license_number, type: string, nullable: true}
+      - {name: phone, type: string, nullable: true}
+      - {name: status, type: string, nullable: true}
+      - {name: safety_score, type: double, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+      - {name: updated_at, type: string, nullable: true}
+    transforms:
+      - {id: drv_tx_001, type: mask_pii, column: phone, params: {visible_chars: 4}, order: 1}
+      - {id: drv_tx_002, type: mask_pii, column: license_number, params: {visible_chars: 4}, order: 2}
+    dq_rules:
+      - {id: drv_001, type: regex, column: employee_id, params: {pattern: "^DRV\\d{5}$"}, severity: error}
+      - {id: drv_002, type: not_null, column: name, params: {}, severity: error}
+
+  # ============================================================================
+  # vehicle_telemetry: 13 columns
+  # ============================================================================
+  - name: vehicle_telemetry
+    topic: cdc-vehicle_telemetry
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/vehicle_telemetry/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: vehicle_id, type: integer, nullable: true}
+      - {name: recorded_at, type: string, nullable: true}
+      - {name: latitude, type: double, nullable: true}
+      - {name: longitude, type: double, nullable: true}
+      - {name: speed_kmh, type: double, nullable: true}
+      - {name: fuel_level_pct, type: double, nullable: true}
+      - {name: engine_temp_c, type: double, nullable: true}
+      - {name: odometer_km, type: double, nullable: true}
+      - {name: engine_status, type: string, nullable: true}
+      - {name: harsh_braking, type: string, nullable: true}
+      - {name: harsh_acceleration, type: string, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+    dq_rules:
+      - {id: tel_001, type: range, column: latitude, params: {min: -90, max: 90}, severity: error}
+      - {id: tel_002, type: range, column: longitude, params: {min: -180, max: 180}, severity: error}
+      - {id: tel_003, type: range, column: speed_kmh, params: {min: 0, max: 350}, severity: error}
+      - {id: tel_004, type: range, column: fuel_level_pct, params: {min: 0, max: 120}, severity: error}
+      - {id: tel_005, type: not_null, column: vehicle_id, params: {}, severity: error}
+    quality_checks:
+      - {metric: completeness, column: vehicle_id, threshold: 0.95, severity: warning}
+      - {metric: completeness, column: latitude, threshold: 0.90, severity: warning}
+      - {metric: uniqueness, column: id, threshold: 1.0, severity: error}
+      - {metric: size, threshold: 1, severity: warning}
+    transforms:
+      - {id: tel_tx_001, type: round, column: latitude, params: {decimals: 5}, order: 1}
+      - {id: tel_tx_002, type: round, column: longitude, params: {decimals: 5}, order: 2}
+
+  # ============================================================================
+  # deliveries: 14 columns
+  # ============================================================================
+  - name: deliveries
+    topic: cdc-deliveries
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/deliveries/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: vehicle_id, type: integer, nullable: true}
+      - {name: driver_id, type: integer, nullable: true}
+      - {name: status, type: string, nullable: true}
+      - {name: pickup_address, type: string, nullable: true}
+      - {name: delivery_address, type: string, nullable: true}
+      - {name: scheduled_time, type: string, nullable: true}
+      - {name: actual_pickup_time, type: string, nullable: true}
+      - {name: actual_delivery_time, type: string, nullable: true}
+      - {name: customer_name, type: string, nullable: true}
+      - {name: customer_phone, type: string, nullable: true}
+      - {name: notes, type: string, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+      - {name: updated_at, type: string, nullable: true}
+    dq_rules:
+      - {id: del_001, type: allowed_values, column: status, params: {values: ["assigned", "picked_up", "in_transit", "delivered", "failed"]}, severity: error}
+    transforms:
+      - {id: del_tx_001, type: upper, column: status, order: 1}
+      # PII masking: customer contact details are masked before
+      # landing in the lakehouse, consistent with the healthcare-iot example
+      - {id: del_tx_002, type: mask_pii, column: customer_name, params: {visible_chars: 0}, order: 2}
+      - {id: del_tx_003, type: mask_pii, column: customer_phone, params: {visible_chars: 4}, order: 3}
+
+  # ============================================================================
+  # alerts: 11 columns
+  # ============================================================================
+  - name: alerts
+    topic: cdc-alerts
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/alerts/"
+    primary_key: id
+    schema:
+      - {name: id, type: integer, nullable: false}
+      - {name: vehicle_id, type: integer, nullable: true}
+      - {name: driver_id, type: integer, nullable: true}
+      - {name: alert_type, type: string, nullable: true}
+      - {name: severity, type: string, nullable: true}
+      - {name: message, type: string, nullable: true}
+      - {name: latitude, type: double, nullable: true}
+      - {name: longitude, type: double, nullable: true}
+      - {name: acknowledged, type: string, nullable: true}
+      - {name: acknowledged_at, type: string, nullable: true}
+      - {name: created_at, type: string, nullable: true}
+    dq_rules:
+      - {id: alt_001, type: allowed_values, column: alert_type, params: {values: ["speeding", "harsh_braking", "low_fuel", "engine_overheat", "geofence_violation"]}, severity: error}
+
+  # ============================================================================
+  # Internal table for native Glue DQ results (no Kafka source)
+  # ============================================================================
+  - name: dq_metrics
+    internal: true
+    delta_path: "s3://${STACK_NAME}-delta-${AWS_ACCOUNT_ID}/dq_metrics/"
+    primary_key: null
+    # Schema matches the native Glue DQ results written by glue_dq_analyzer.py
+    schema:
+      - {name: table_name, type: string, nullable: false}
+      - {name: batch_id, type: bigint, nullable: false}
+      - {name: rule, type: string, nullable: false}
+      - {name: outcome, type: string, nullable: false}
+      - {name: failure_reason, type: string, nullable: true}
+      - {name: evaluated_metrics, type: string, nullable: true}
+      - {name: passed, type: boolean, nullable: false}
+      - {name: timestamp, type: timestamp, nullable: false}

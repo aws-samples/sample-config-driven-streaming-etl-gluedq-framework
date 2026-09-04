@@ -1,0 +1,60 @@
+# GitLab SAST ruleset customization.
+#
+# Disables four kics (IaC) queries whose findings were triaged as
+# by-design/accepted for this sample. Full evidence and rationale:
+# SECURITY.md -> "SAST Scan Triage".
+#
+# Summary of why each is disabled rather than "fixed":
+#
+# 1. IAM policy allows for data exfiltration (022f8938-...):
+#    Fires on the mere presence of read actions (s3:GetObject,
+#    secretsmanager:GetSecretValue) regardless of resource scoping. Every
+#    flagged policy here is scoped to this stack's own buckets/secrets/catalog
+#    (verified: it flags `GetSecretValue` scoped to a single secret ARN).
+#    The pipeline cannot run without reading its own config and credentials.
+#
+# 2. Security Group Ingress With Port Range (87482183-...):
+#    The remaining hit is the Glue self-referencing all-TCP rule, an AWS Glue
+#    REQUIREMENT for jobs in a VPC (Spark shuffle; Glue validates the rule
+#    exists). Source is the SG itself - no CIDR exposure. CIDR-open ingress
+#    remains covered by other still-enabled queries.
+#
+# 3. S3 Bucket Logging Disabled (4552b71f-...):
+#    Flags the dedicated server-access-logging DESTINATION bucket. Logging it
+#    to itself creates recursive log growth, which AWS recommends against.
+#    All data buckets in the stack log to this bucket.
+#
+# 4. VPC Without Network Firewall (3e293410-...):
+#    Demo-scope decision: AWS Network Firewall would roughly double the
+#    stack's monthly cost for a sample. Compensating controls: private
+#    subnets, SG-reference-only rules, TLS-only bucket policies, VPC Flow
+#    Logs. Documented in README "Availability & Networking".
+
+[kics]
+  [[kics.ruleset]]
+    disable = true
+    [kics.ruleset.identifier]
+      type = "kics_id"
+      value = "022f8938-4b17-420c-aca3-f917f290f322"
+      name = "IAM policy allows for data exfiltration"
+
+  [[kics.ruleset]]
+    disable = true
+    [kics.ruleset.identifier]
+      type = "kics_id"
+      value = "87482183-a8e7-4e42-a566-7a23ec231c16"
+      name = "Security Group Ingress With Port Range"
+
+  [[kics.ruleset]]
+    disable = true
+    [kics.ruleset.identifier]
+      type = "kics_id"
+      value = "4552b71f-0a2a-4bc4-92dd-ed7ec1b4674c"
+      name = "S3 Bucket Logging Disabled"
+
+  [[kics.ruleset]]
+    disable = true
+    [kics.ruleset.identifier]
+      type = "kics_id"
+      value = "3e293410-d5b8-411f-85fd-7d26294f20c9"
+      name = "VPC Without Network Firewall"
